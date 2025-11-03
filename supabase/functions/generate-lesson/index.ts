@@ -1,187 +1,182 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// ✅ Proper CORS headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-api-version, x-supabase-authorization, x-requested-with",
-  "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
-  "Access-Control-Max-Age": "86400",
-  "Vary": "Origin",
+  "Access-Control-Allow-Headers": "*",
+  "Access-Control-Allow-Methods": "OPTIONS, POST",
+  "Content-Type": "application/json",
 };
 
 serve(async (req) => {
-  // ✅ Handle CORS preflight request
   if (req.method === "OPTIONS") {
-    const reqHeaders =
-      req.headers.get("Access-Control-Request-Headers") ||
-      corsHeaders["Access-Control-Allow-Headers"];
-
-    const dynamicHeaders = {
-      ...corsHeaders,
-      "Access-Control-Allow-Headers": reqHeaders,
-    } as Record<string, string>;
-
-    // ✅ Always return status 200 and a short body for CORS success
-    return new Response("ok", {
-      status: 200,
-      headers: dynamicHeaders,
-    });
+    return new Response("ok", { headers: corsHeaders });
   }
 
   try {
     const { lessonId, courseId, title, outline } = await req.json();
+    if (!title) {
+      return new Response(JSON.stringify({ error: "Missing 'title'" }), {
+        status: 400,
+        headers: corsHeaders,
+      });
+    }
 
-    if (!lessonId || !courseId || !title) {
+    const GOOGLE_API_KEY = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY");
+    if (!GOOGLE_API_KEY) {
       return new Response(
-        JSON.stringify({ error: "lessonId, courseId and title are required" }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
+        JSON.stringify({ error: "❌ GOOGLE_API_KEY/GEMINI_API_KEY not set in Supabase secrets" }),
+        { status: 500, headers: corsHeaders }
       );
     }
 
-    const GOOGLE_API_KEY = Deno.env.get("GOOGLE_API_KEY");
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    // Initialize Supabase client for optional persistence
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const authHeader = req.headers.get("Authorization") ?? "";
+    const supabase = supabaseUrl && (anonKey || serviceRole)
+      ? createClient(supabaseUrl, serviceRole ?? anonKey!, {
+          global: { headers: serviceRole ? {} : { Authorization: authHeader } },
+        })
+      : null;
 
-    if (!GOOGLE_API_KEY && !LOVABLE_API_KEY) {
+    const system =
+      "You are an expert Indian financial literacy educator. Produce deeply detailed, actionable lessons in clean Markdown with clear structure and pedagogy.";
+    const prompt = `Create a comprehensive lesson on: "${title}"\n\nRequirements:\n- Audience: Beginners in India (ages 13–22).\n- Tone: Clear, friendly, and practical.\n- Output: Pure Markdown (no code fences).\n- Length: 900–1400 words.\n\nMust include, in order:\n1. Title (H1)\n2. Why it matters (3–5 bullets)\n3. Core concepts (H2) with subsections and examples (India-specific where possible)\n4. Step-by-step guide or framework with numbered steps\n5. Do/Don't checklist\n6. Real-life scenarios (2–3) with outcomes\n7. Mini case study (India context)\n8. Common mistakes and how to fix them\n9. Glossary (5–8 terms, simple definitions)\n10. 3 Multiple-Choice Questions with answers marked\n11. 7-day action plan (bullet list)\n12. Quick recap (3 bullets)\n13. Motivational tip\n\nContext/Outline (optional): ${outline ?? "N/A"}`;
+
+    // ✅ Using gemini-2.5-flash-lite
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key=${GOOGLE_API_KEY}`;
+
+    const body = {
+      contents: [
+        {
+          parts: [{ text: `${system}\n\n${prompt}` }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 4096,
+        topP: 0.9,
+      },
+    };
+
+    console.log("Calling Gemini API...");
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const text = await response.text();
+    console.log("Response status:", response.status);
+    console.log("Response headers:", Object.fromEntries(response.headers.entries()));
+    console.log("Gemini raw response:", text);
+
+    if (!response.ok) {
       return new Response(
         JSON.stringify({
-          error:
-            "No AI provider configured. Set GOOGLE_API_KEY or LOVABLE_API_KEY.",
+          error: `Gemini API error (${response.status})`,
+          details: text,
         }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
+        { status: response.status, headers: corsHeaders }
       );
     }
 
-    // ✅ Initialize Supabase client (RLS-aware)
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const authHeader = req.headers.get("Authorization");
-
-    const supabase = createClient(supabaseUrl, serviceKey ?? supabaseAnonKey, {
-      global: { headers: serviceKey ? {} : { Authorization: authHeader ?? "" } },
-    });
-
-    // ✅ Check for existing lesson
-    const { data: existing, error: fetchErr } = await supabase
-      .from("lessons")
-      .select("content, title, estimated_minutes, xp_reward")
-      .eq("id", lessonId)
-      .eq("course_id", courseId)
-      .single();
-
-    if (fetchErr && (fetchErr as any).code !== "PGRST116") {
-      return new Response(JSON.stringify({ error: fetchErr.message }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    if (existing?.content) {
-      return new Response(JSON.stringify({ content: existing.content }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // ✅ AI Prompt setup
-    const system =
-      "You are a financial literacy lesson author. Return clear, structured content with headings, bullet points, and examples. Keep it actionable and concise.";
-    const userPrompt = `Write a complete lesson for the topic: "${title}".
-Context/Outline (optional): ${outline ?? "N/A"}
-Audience: Beginners. Keep it India-friendly when relevant.
-Output plain text/markdown. No code fences.`;
-
-    let contentText = "";
-
-    // ✅ Google Gemini
-    if (GOOGLE_API_KEY) {
-      const endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
-      const payload = {
-        contents: [{ role: "user", parts: [{ text: `${system}\n\n${userPrompt}` }] }],
-      };
-
-      const r = await fetch(`${endpoint}?key=${GOOGLE_API_KEY}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!r.ok) {
-        const t = await r.text();
-        console.error("Gemini error", r.status, t);
-        return new Response(JSON.stringify({ error: "AI generation failed" }), {
-          status: r.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      const j = await r.json();
-      contentText = j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    }
-    // ✅ Lovable AI fallback
-    else {
-      const r = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${LOVABLE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.7,
+    if (!text || text.trim() === "") {
+      return new Response(
+        JSON.stringify({
+          error: "Empty response from Gemini API",
+          hint: "Check your API key, quota, and billing status at https://makersuite.google.com/app/apikey",
         }),
-      });
+        { status: 500, headers: corsHeaders }
+      );
+    }
 
-      if (!r.ok) {
-        const t = await r.text();
-        console.error("Lovable error", r.status, t);
-        return new Response(JSON.stringify({ error: "AI generation failed" }), {
-          status: r.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      return new Response(
+        JSON.stringify({
+          error: "Invalid JSON from Gemini",
+          raw: text.slice(0, 500),
+          parseError: parseError.message,
+        }),
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    // Extract lesson text
+    const lessonText =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "⚠️ No lesson generated (empty response from Gemini).";
+
+    if (lessonText.includes("⚠️")) {
+      console.log("Full Gemini response:", JSON.stringify(data, null, 2));
+    }
+
+    // Persist only if empty content in DB
+    let saved = false as boolean;
+    let dbError: string | null = null;
+    if (supabase && lessonId && courseId) {
+      const { data: existingRow, error: selErr } = await supabase
+        .from("lessons")
+        .select("content")
+        .eq("id", lessonId)
+        .eq("course_id", courseId)
+        .single();
+      if (!selErr) {
+        const hasExisting = !!(existingRow?.content && String(existingRow.content).trim() !== "");
+        if (!hasExisting) {
+          const { error: updErr } = await supabase
+            .from("lessons")
+            .update({ content: lessonText })
+            .eq("id", lessonId)
+            .eq("course_id", courseId);
+          if (updErr) {
+            dbError = updErr.message ?? "Unknown DB error";
+            console.error("DB update failed:", dbError);
+          } else {
+            saved = true;
+          }
+        }
+      } else {
+        // If lesson row does not exist, attempt to insert it with minimal fields
+        const { error: insErr } = await supabase
+          .from("lessons")
+          .insert({
+            id: lessonId,
+            course_id: courseId,
+            title: title ?? 'Lesson',
+            content: lessonText,
+            order_index: 1,
+            xp_reward: 100,
+            estimated_minutes: 10,
+          });
+        if (insErr) {
+          dbError = insErr.message ?? "Unknown DB insert error";
+          console.error("DB insert failed:", dbError);
+        } else {
+          saved = true;
+        }
       }
-
-      const j = await r.json();
-      contentText = j?.choices?.[0]?.message?.content ?? "";
     }
 
-    // ✅ Save generated content
-    const { error: updateErr } = await supabase
-      .from("lessons")
-      .update({ content: contentText })
-      .eq("id", lessonId)
-      .eq("course_id", courseId);
-
-    if (updateErr) {
-      return new Response(JSON.stringify({ error: updateErr.message }), {
+    return new Response(JSON.stringify({ content: lessonText, saved, dbError }), {
+      headers: corsHeaders,
+    });
+  } catch (err) {
+    console.error("Unhandled error:", err);
+    return new Response(
+      JSON.stringify({
+        error: err.message,
+        stack: err.stack,
+      }),
+      {
         status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // ✅ Return success response
-    return new Response(JSON.stringify({ content: contentText }), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } catch (error) {
-    console.error("Error:", error);
-    const msg = error instanceof Error ? error.message : "Unknown error";
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+        headers: corsHeaders,
+      }
+    );
   }
 });

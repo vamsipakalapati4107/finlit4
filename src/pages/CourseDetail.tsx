@@ -202,29 +202,47 @@ export default function CourseDetail() {
     }
   };
 
-  const ensureLessonContent = async (lessonId: string, title: string) => {
+  const ensureLessonContent = async (lessonId: string, title: string, force: boolean = false) => {
     if (!courseId) return;
     const lesson = lessons.find(l => l.id === lessonId);
-    if (lesson && lesson.content && lesson.content.trim() !== '') return;
+    if (!force && lesson && lesson.content && lesson.content.trim() !== '') {
+      try { console.log('Skip generation: content already exists for', { lessonId, title }); } catch {}
+      return;
+    }
     try {
       setEnsuringContent(true);
+      try { console.log('Generating lesson content (CourseDetail) → invoke generate-lesson', { lessonId, courseId, title }); } catch {}
       const { data, error } = await supabase.functions.invoke('generate-lesson', {
         body: { lessonId, courseId, title }
       });
       if (error || (data as any)?.error) {
         throw new Error((data as any)?.error || error?.message || 'Failed to generate');
       }
-      if ((data as any)?.content) {
-        setLessons(curr => curr.map(l => l.id === lessonId ? { ...l, content: (data as any).content } : l));
+      const payload = data as any;
+      const content = (payload?.content ?? payload?.lesson) as string | undefined;
+      if (content && content.trim() !== '') {
+        try { console.log('Generated lesson content (CourseDetail):', { content, saved: payload?.saved, dbError: payload?.dbError }); } catch {}
+        setLessons(curr => curr.map(l => l.id === lessonId ? { ...l, content } : l));
         toast.success('Lesson content generated');
+      } else {
+        console.warn('No content returned from generate-lesson');
       }
     } catch (e: any) {
       const msg = e?.message || 'Unknown error';
       console.error('ensureLessonContent error:', msg);
       toast.error(`Could not generate lesson content: ${msg}`);
     } finally {
+      try { console.log('Generation finished (CourseDetail) for', { lessonId, title }); } catch {}
       setEnsuringContent(false);
     }
+  };
+
+  const startOrReview = async () => {
+    const current = lessons[currentLessonIndex];
+    if (!current || !courseId) return;
+    // Only generate if empty (no force)
+    await ensureLessonContent(current.id, current.title, false);
+    navigate(`/course/${courseId}/lesson/${current.id}`);
   };
 
   if (loading) {
@@ -301,7 +319,12 @@ export default function CourseDetail() {
               {lessons.map((lesson, index) => (
                 <button
                   key={lesson.id}
-                  onClick={() => setCurrentLessonIndex(index)}
+                  onClick={() => {
+                    setCurrentLessonIndex(index);
+                    if (!lesson.content || lesson.content.trim() === '') {
+                      ensureLessonContent(lesson.id, lesson.title);
+                    }
+                  }}
                   className={`w-full text-left p-3 rounded-lg border-2 transition-all ${
                     index === currentLessonIndex
                       ? 'border-purple-500 bg-purple-50'
@@ -371,7 +394,7 @@ export default function CourseDetail() {
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  onClick={() => ensureLessonContent(currentLesson.id, currentLesson.title)}
+                  onClick={startOrReview}
                   disabled={ensuringContent}
                 >
                   {currentLesson.completed ? 'Review' : 'Start'}

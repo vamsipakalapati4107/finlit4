@@ -42,6 +42,7 @@ export default function Learn() {
   const [userProgress, setUserProgress] = useState<UserProgress[]>([]);
   const [loading, setLoading] = useState(true);
   const [ensuringLessonId, setEnsuringLessonId] = useState<string | null>(null);
+  const [prefetchingCourseId, setPrefetchingCourseId] = useState<string | null>(null);
   const { user } = useAuth();
   const navigate = useNavigate();
   const { courseId } = useParams();
@@ -114,32 +115,47 @@ export default function Learn() {
 
   const ensureLessonContent = async (lesson: Lesson) => {
     if (!selectedCourse) return lesson;
-    if (lesson.content && lesson.content.trim() !== '') return lesson;
+    if (lesson.content && lesson.content.trim() !== '') {
+      try { console.log('Skip generation (Learn): content already exists for', { lessonId: lesson.id, title: lesson.title }); } catch {}
+      return lesson;
+    }
     try {
       setEnsuringLessonId(lesson.id);
+      try { console.log('Generating lesson content (Learn) → invoke generate-lesson', { lessonId: lesson.id, courseId: selectedCourse.id, title: lesson.title }); } catch {}
       const { data, error } = await supabase.functions.invoke('generate-lesson', {
         body: { lessonId: lesson.id, courseId: selectedCourse.id, title: lesson.title }
       });
       if (error || (data as any)?.error) {
         throw new Error((data as any)?.error || error?.message || 'Failed to generate');
       }
-      if ((data as any)?.content) {
-        const content = (data as any).content as string;
+      const payload = data as any;
+      const content = (payload?.content ?? payload?.lesson) as string | undefined;
+      if (content && content.trim() !== '') {
+        try { console.log('Generated lesson content (Learn):', { content, saved: payload?.saved, dbError: payload?.dbError }); } catch {}
         setLessons(curr => curr.map(l => l.id === lesson.id ? { ...l, content } : l));
         return { ...lesson, content } as Lesson;
+      } else {
+        console.warn('No content returned from generate-lesson');
       }
     } catch (e: any) {
       console.error('ensureLessonContent error:', e?.message || e);
       toast.error(`Could not generate lesson content: ${e?.message || 'Unknown error'}`);
     } finally {
+      try { console.log('Generation finished (Learn) for', { lessonId: lesson.id, title: lesson.title }); } catch {}
       setEnsuringLessonId(null);
     }
     return lesson;
   };
 
   const startLesson = async (lesson: Lesson) => {
-    const withContent = await ensureLessonContent(lesson);
-    setCurrentLesson(withContent);
+    if (!selectedCourse) return;
+    // Do not generate here; navigate to Course Detail page where generation occurs on click
+    navigate(`/course/${selectedCourse.id}`);
+  };
+
+  const startLearningCourse = async (course: Course) => {
+    // Do not pre-generate on Learn page; just navigate to Course Detail
+    navigate(`/course/${course.id}`);
   };
 
   const completeLesson = async () => {
@@ -369,7 +385,7 @@ export default function Learn() {
                       disabled={locked}
                       variant={completed ? 'outline' : 'default'}
                     >
-                      {ensuringLessonId === lesson.id ? 'Preparing...' : (completed ? 'Review' : locked ? 'Locked' : 'Start')}
+                      {completed ? 'Review' : locked ? 'Locked' : 'Start'}
                     </Button>
                   </div>
                 </Card>
@@ -435,9 +451,10 @@ export default function Learn() {
 
                 <Button 
                   className="w-full" 
-                  onClick={() => navigate(`/course/${course.id}`)}
+                  onClick={() => startLearningCourse(course)}
+                  disabled={prefetchingCourseId === course.id}
                 >
-                  Start Learning
+                  {prefetchingCourseId === course.id ? 'Preparing…' : 'Start Learning'}
                 </Button>
               </Card>
             ))}

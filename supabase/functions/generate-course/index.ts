@@ -1,123 +1,169 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-api-version, x-supabase-authorization, x-requested-with',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
-  'Access-Control-Max-Age': '86400',
-  'Vary': 'Origin',
-};
-
-type GenLesson = {
-  title: string;
-  content: string;
-  estimated_minutes: number;
-  xp_reward: number;
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "*",
+  "Access-Control-Allow-Methods": "OPTIONS, POST",
+  "Content-Type": "application/json",
 };
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    const reqHeaders = req.headers.get('Access-Control-Request-Headers') || corsHeaders['Access-Control-Allow-Headers'];
-    const dynamic = { ...corsHeaders, 'Access-Control-Allow-Headers': reqHeaders } as Record<string, string>;
-    return new Response(null, { headers: dynamic });
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
   }
 
   try {
     const { courseId, titleHint } = await req.json();
-    if (!courseId) {
-      return new Response(JSON.stringify({ error: 'courseId is required' }), {
+    const title = titleHint ?? "Financial Literacy";
+    if (!title) {
+      return new Response(JSON.stringify({ error: "Missing 'title'" }), {
         status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        headers: corsHeaders,
       });
     }
 
-    const GOOGLE_API_KEY = Deno.env.get('GOOGLE_API_KEY');
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+    const GOOGLE_API_KEY = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY");
+    if (!GOOGLE_API_KEY) {
+      return new Response(
+        JSON.stringify({ error: "❌ GOOGLE_API_KEY/GEMINI_API_KEY not set in Supabase secrets" }),
+        { status: 500, headers: corsHeaders }
+      );
+    }
+    // Supabase client for persistence
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabase = supabaseUrl && (anonKey || serviceRole)
+      ? createClient(supabaseUrl, serviceRole ?? anonKey!)
+      : null;
 
-    const prompt = `Create a concise financial literacy course with 6 lessons for beginners.
-Return strict JSON with fields: {
-  "course": {"title": string, "description": string, "difficulty": "Beginner"|"Intermediate"|"Advanced", "estimated_hours": number, "icon": string},
-  "lessons": Array<{"title": string, "content": string, "estimated_minutes": number, "xp_reward": number}>
+    const jsonPrompt = `Return ONLY JSON.
+Design a financial literacy course titled "${title}" for beginners in India.
+JSON schema:
+{
+  "course": { "title": string, "description": string, "difficulty": "beginner"|"intermediate"|"advanced", "estimated_hours": number, "icon": string },
+  "lessons": [
+    { "title": string, "content": string, "xp_reward": number, "estimated_minutes": number }
+  ]
 }
-Focus on practical, Indian context friendly examples where relevant. Title hint: ${titleHint ?? 'Financial Literacy 101'}.`;
+Constraints: 5-8 lessons. content should be markdown, concise, practical, with headings & bullet points.`;
 
-    if (!GOOGLE_API_KEY && !LOVABLE_API_KEY) {
-      return new Response(JSON.stringify({ error: 'No AI provider configured. Set GOOGLE_API_KEY (preferred) or LOVABLE_API_KEY.' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key=${GOOGLE_API_KEY}`;
+    const body = {
+      contents: [
+        { parts: [{ text: jsonPrompt }] },
+      ],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 4096 },
+    } as const;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      return new Response(JSON.stringify({ error: `Gemini error ${response.status}`, raw: raw.slice(0, 800) }), {
+        status: response.status,
+        headers: corsHeaders,
+      });
     }
 
-    let text: string | undefined;
-    if (GOOGLE_API_KEY) {
-      // Direct Google Gemini: instruct to return strict JSON
-      const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-      const sys = 'You return strict JSON only. No prose. No code fences.';
-      const payload = {
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: `${sys}\n\n${prompt}` }],
-          },
+    let parsed: any = null;
+    try {
+      const j = JSON.parse(raw);
+      const txt = j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      parsed = JSON.parse(txt);
+    } catch (e) {
+      // Fallback: basic course and a single lesson from text
+      parsed = {
+        course: {
+          title,
+          description: `${title} course overview`,
+          difficulty: "beginner",
+          estimated_hours: 3,
+          icon: "📘",
+        },
+        lessons: [
+          { title: `${title} Basics`, content: raw.slice(0, 2000), xp_reward: 100, estimated_minutes: 10 },
         ],
       };
-      const r = await fetch(`${endpoint}?key=${GOOGLE_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!r.ok) {
-        const t = await r.text();
-        console.error('Gemini error', r.status, t);
-        return new Response(JSON.stringify({ error: 'AI generation failed' }), { status: r.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // Ensure minimal structure
+    const courseOut = parsed.course ?? { title, description: `${title} course`, difficulty: "beginner", estimated_hours: 3, icon: "📘" };
+    const lessonsOut: any[] = Array.isArray(parsed.lessons) && parsed.lessons.length > 0 ? parsed.lessons : [
+      { title: `${title} 101`, content: "Introduction", xp_reward: 100, estimated_minutes: 10 },
+    ];
+
+    // Persist to DB if possible
+    let finalCourseId = courseId;
+    if (supabase) {
+      // Upsert course
+      if (finalCourseId) {
+        await supabase.from("courses").upsert({
+          id: finalCourseId,
+          title: courseOut.title,
+          description: courseOut.description,
+          difficulty: courseOut.difficulty ?? "beginner",
+          lessons_count: lessonsOut.length,
+          estimated_hours: courseOut.estimated_hours ?? 3,
+          icon: courseOut.icon ?? "📘",
+        }).select();
+      } else {
+        const { data: cins } = await supabase.from("courses").insert({
+          title: courseOut.title,
+          description: courseOut.description,
+          difficulty: courseOut.difficulty ?? "beginner",
+          lessons_count: lessonsOut.length,
+          estimated_hours: courseOut.estimated_hours ?? 3,
+          icon: courseOut.icon ?? "📘",
+        }).select("id").single();
+        finalCourseId = cins?.id ?? finalCourseId;
       }
-      const j = await r.json();
-      text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
-    } else if (LOVABLE_API_KEY) {
-      const r = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
-          messages: [
-            { role: 'system', content: 'You are a course author who returns strict JSON only.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.7,
-        }),
-      });
-      if (!r.ok) {
-        const t = await r.text();
-        console.error('Lovable error', r.status, t);
-        return new Response(JSON.stringify({ error: 'AI generation failed' }), { status: r.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+      if (finalCourseId) {
+        // Delete existing lessons for idempotency, then insert
+        await supabase.from("lessons").delete().eq("course_id", finalCourseId);
+        const rows = lessonsOut.map((l, idx) => ({
+          course_id: finalCourseId,
+          title: l.title,
+          content: l.content,
+          order_index: idx + 1,
+          xp_reward: l.xp_reward ?? 100,
+          estimated_minutes: l.estimated_minutes ?? 10,
+        }));
+        if (rows.length > 0) {
+          await supabase.from("lessons").insert(rows);
+        }
       }
-      const j = await r.json();
-      text = j?.choices?.[0]?.message?.content;
     }
 
-    if (!text) {
-      return new Response(JSON.stringify({ error: 'Empty AI response' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    }
-
-    // Attempt to parse JSON content (strip possible markdown fences)
-    const jsonText = text.replace(/^```(?:json)?\n|\n```$/g, '');
-    let parsed: any;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch (e) {
-      console.error('Parse error', e, jsonText);
-      return new Response(JSON.stringify({ error: 'Malformed AI JSON' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    }
-
-    const course = parsed.course as { title: string; description: string; difficulty: string; estimated_hours: number; icon: string };
-    const lessons = (parsed.lessons as GenLesson[]).slice(0, 12);
-
-    return new Response(JSON.stringify({ course, lessons }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-  } catch (error) {
-    console.error('Error:', error);
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    // Return structured payload for client-side rendering as well
+    return new Response(JSON.stringify({
+      course: {
+        title: courseOut.title,
+        description: courseOut.description,
+        difficulty: courseOut.difficulty,
+        estimated_hours: courseOut.estimated_hours,
+        icon: courseOut.icon,
+      },
+      lessons: lessonsOut,
+      courseId: finalCourseId,
+    }), { headers: corsHeaders });
+  } catch (err) {
+    console.error("Unhandled error:", err);
+    return new Response(
+      JSON.stringify({
+        error: err.message,
+        stack: err.stack,
+      }),
+      {
+        status: 500,
+        headers: corsHeaders,
+      }
+    );
   }
 });
-
-

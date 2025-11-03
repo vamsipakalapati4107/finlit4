@@ -44,11 +44,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const handleDailyLoginReward = async (userId: string) => {
     try {
-      const { data: profile } = await supabase
+      const { data: profile, error } = await supabase
         .from('profiles')
         .select('last_login_date, streak_days, xp')
         .eq('id', userId)
-        .single();
+        .maybeSingle();
+
+      if (error) return; // silently ignore errors
+      if (!profile) {
+        try {
+          await supabase
+            .from('profiles')
+            .insert({ id: userId })
+            .select('id')
+            .single();
+        } catch {
+          // ignore insert race conditions
+        }
+        return; // profile will exist next time
+      }
 
       const today = new Date();
       const todayStr = today.toISOString().split('T')[0];

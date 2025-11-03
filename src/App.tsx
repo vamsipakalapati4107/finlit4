@@ -12,6 +12,8 @@ import Onboarding from "./pages/Onboarding";
 import Dashboard from "./pages/Dashboard";
 import Expenses from "./pages/Expenses";
 import Learn from "./pages/Learn";
+import CourseDetail from "./pages/CourseDetail";
+import LessonDetail from "./pages/LessonDetail";
 import Quiz from "./pages/Quiz";
 import Budget from "./pages/Budget";
 import AICoach from "./pages/AICoach";
@@ -38,7 +40,8 @@ const App = () => (
             <Route path="/expenses" element={<ProtectedRoute><Expenses /></ProtectedRoute>} />
             <Route path="/budget" element={<ProtectedRoute><Budget /></ProtectedRoute>} />
             <Route path="/learn" element={<ProtectedRoute><Learn /></ProtectedRoute>} />
-            <Route path="/course/:courseId" element={<ProtectedRoute><Learn /></ProtectedRoute>} />
+            <Route path="/course/:courseId" element={<ProtectedRoute><CourseDetail /></ProtectedRoute>} />
+            <Route path="/course/:courseId/lesson/:lessonId" element={<ProtectedRoute><LessonDetail /></ProtectedRoute>} />
             <Route path="/quiz" element={<ProtectedRoute><Quiz /></ProtectedRoute>} />
             <Route path="/ai-coach" element={<ProtectedRoute><AICoach /></ProtectedRoute>} />
             <Route path="/achievements" element={<ProtectedRoute><Achievements /></ProtectedRoute>} />
